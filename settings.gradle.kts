@@ -22,6 +22,6 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "PokemonRandom"
+rootProject.name = "PokedexScroll"
 include(":app")
  

@@ -1,54 +1,50 @@
 package com.example.pokemonrandom
 
 import android.os.Bundle
-import androidx.activity.compose.setContent
+import android.view.View
+import android.widget.ProgressBar
+import android.widget.Toast
 import androidx.activity.enableEdgeToEdge
 import androidx.appcompat.app.AppCompatActivity
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.material3.Button
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.unit.dp
-import androidx.lifecycle.ViewModel
-import androidx.lifecycle.viewModelScope
-import androidx.lifecycle.viewmodel.compose.viewModel
-import coil.compose.AsyncImage
-import com.google.gson.annotations.SerializedName
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.lifecycle.lifecycleScope
+import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.PagerSnapHelper
+import androidx.recyclerview.widget.RecyclerView
 import kotlinx.coroutines.launch
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
 import retrofit2.http.GET
 import retrofit2.http.Path
+import retrofit2.http.Query
 
-// Main Pokémon response object
-data class PokemonResponse(
-    val id: Int,
-    val name: String,
-    val types: List<TypeSlot>,
-    val stats: List<StatSlot>,
-    val sprites: Sprites
+// Pokémon list response models
+data class PokemonListResponse(
+    val results: List<PokemonListItem>
 )
 
-// Types representation (e.g., Electric, Fire)
+data class PokemonListItem(
+    val name: String,
+    val url: String
+) {
+    val id: Int
+        get() {
+            val parts = url.trimEnd('/').split('/')
+            return parts.lastOrNull()?.toIntOrNull() ?: 0
+        }
+
+    val imageUrl: String
+        get() = "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/$id.png"
+}
+
+// Pokémon detail models for type information
+data class PokemonDetailResponse(
+    val id: Int,
+    val name: String,
+    val types: List<TypeSlot>
+)
+
 data class TypeSlot(
     val slot: Int,
     val type: TypeInfo
@@ -58,25 +54,18 @@ data class TypeInfo(
     val name: String
 )
 
-// Base Stats representation (e.g., HP: 35, Attack: 55)
-data class StatSlot(
-    @SerializedName("base_stat") val baseStat: Int,
-    val stat: StatInfo
-)
-
-data class StatInfo(
-    val name: String
-)
-
-// Image URL representation
-data class Sprites(
-    @SerializedName("front_default") val frontDefault: String?
-)
-
 // PokeApiService interface for Retrofit API calls
 interface PokeApiService {
+    @GET("pokemon")
+    suspend fun getPokemonList(
+        @Query("limit") limit: Int = 100,
+        @Query("offset") offset: Int = 0
+    ): PokemonListResponse
+
     @GET("pokemon/{name}")
-    suspend fun getPokemon(@Path("name") name: String): PokemonResponse
+    suspend fun getPokemonDetails(
+        @Path("name") name: String
+    ): PokemonDetailResponse
 
     companion object {
         private const val BASE_URL = "https://pokeapi.co/api/v2/"
@@ -91,127 +80,45 @@ interface PokeApiService {
     }
 }
 
-sealed interface PokemonUiState {
-    object Idle : PokemonUiState
-    object Loading : PokemonUiState
-    data class Success(val pokemon: PokemonResponse) : PokemonUiState
-    data class Error(val message: String) : PokemonUiState
-}
-
-class PokemonViewModel : ViewModel() {
-    var uiState: PokemonUiState by mutableStateOf(PokemonUiState.Idle)
-        private set
-
-    fun fetchPokemon(name: String) {
-        if (name.isBlank()) return
-
-        viewModelScope.launch {
-            uiState = PokemonUiState.Loading
-            try {
-                val result = PokeApiService.api.getPokemon(name.lowercase().trim())
-                uiState = PokemonUiState.Success(result)
-            } catch (e: Exception) {
-                uiState = PokemonUiState.Error("Pokémon not found or network error!")
-            }
-        }
-    }
-}
-
 class MainActivity : AppCompatActivity() {
+
+    private lateinit var rvPokemon: RecyclerView
+    private lateinit var progressBar: ProgressBar
+    private val pokemonAdapter = PokemonAdapter()
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        setContent {
-            PokemonScreen()
+        setContentView(R.layout.activity_main)
+
+        ViewCompat.setOnApplyWindowInsetsListener(findViewById(R.id.main)) { v, insets ->
+            val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+            v.setPadding(systemBars.left, systemBars.top, systemBars.right, systemBars.bottom)
+            insets
         }
+
+        rvPokemon = findViewById(R.id.rvPokemon)
+        progressBar = findViewById(R.id.progressBar)
+
+        rvPokemon.layoutManager = LinearLayoutManager(this, LinearLayoutManager.VERTICAL, false)
+        val snapHelper = PagerSnapHelper()
+        snapHelper.attachToRecyclerView(rvPokemon)
+
+        rvPokemon.adapter = pokemonAdapter
+
+        fetchPokemonList()
     }
-}
 
-@Composable
-fun PokemonScreen(viewModel: PokemonViewModel = viewModel()) {
-    var searchQuery by remember { mutableStateOf("") }
-
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(16.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        // Search Bar
-        OutlinedTextField(
-            value = searchQuery,
-            onValueChange = { searchQuery = it },
-            label = { Text("Enter Pokémon name (e.g. pikachu)") },
-            modifier = Modifier.fillMaxWidth(),
-            singleLine = true
-        )
-
-        Spacer(modifier = Modifier.height(8.dp))
-
-        Button(
-            onClick = { viewModel.fetchPokemon(searchQuery) },
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Text("Search")
-        }
-
-        Spacer(modifier = Modifier.height(24.dp))
-
-        // Display results based on UI State
-        when (val state = viewModel.uiState) {
-            is PokemonUiState.Idle -> Text("Type a Pokémon name to search.")
-            is PokemonUiState.Loading -> CircularProgressIndicator()
-            is PokemonUiState.Error -> Text(text = state.message, color = MaterialTheme.colorScheme.error)
-            is PokemonUiState.Success -> PokemonDetailCard(state.pokemon)
-        }
-    }
-}
-
-@Composable
-fun PokemonDetailCard(pokemon: PokemonResponse) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        elevation = CardDefaults.cardElevation(4.dp)
-    ) {
-        Column(
-            modifier = Modifier.padding(16.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            // Pokémon Sprite Image
-            AsyncImage(
-                model = pokemon.sprites.frontDefault,
-                contentDescription = pokemon.name,
-                modifier = Modifier.size(120.dp)
-            )
-
-            // Piece #1: Name and ID
-            Text(
-                text = "#${pokemon.id} ${pokemon.name.replaceFirstChar { it.uppercase() }}",
-                style = MaterialTheme.typography.headlineMedium
-            )
-
-            Spacer(modifier = Modifier.height(12.dp))
-
-            // Piece #2: Types
-            Text(
-                text = "Types: " + pokemon.types.joinToString { it.type.name.replaceFirstChar { char -> char.uppercase() } },
-                style = MaterialTheme.typography.bodyLarge
-            )
-
-            Spacer(modifier = Modifier.height(12.dp))
-
-            // Piece #3: Stats
-            Text(text = "Base Stats:", style = MaterialTheme.typography.titleMedium)
-            Column(modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) {
-                pokemon.stats.forEach { statSlot ->
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text(text = statSlot.stat.name.uppercase())
-                        Text(text = statSlot.baseStat.toString())
-                    }
-                }
+    private fun fetchPokemonList() {
+        progressBar.visibility = View.VISIBLE
+        lifecycleScope.launch {
+            try {
+                val response = PokeApiService.api.getPokemonList(limit = 100)
+                pokemonAdapter.updateData(response.results)
+            } catch (e: Exception) {
+                Toast.makeText(this@MainActivity, "Failed to load Pokémon!", Toast.LENGTH_SHORT).show()
+            } finally {
+                progressBar.visibility = View.GONE
             }
         }
     }
